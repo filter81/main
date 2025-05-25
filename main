@@ -1,0 +1,266 @@
+public class main extends JavaPlugin implements Listener {
+    public ResidenceInterface resmgr;
+    public static main instance;
+    public Configs config;
+    public static String path;
+    public static SimpleDateFormat format;
+    public static boolean reload = false;
+    public String CurrentTask;
+    public ClanManager ClanMgr;        
+    public SimpleClans sc;
+    public Core mvc;
+    public Boolean serverEnable;
+    private static final Logger log = Bukkit.getLogger();
+    public Double siegeTradeAmounts;
+    public Map<String,Dungeon> dungeons= new HashMap<>();
+    public Map<String,Integer> dungeonsStages= new HashMap<>();
+    protected Language NewLanguageManager;
+    
+    @Override
+    public void onEnable()
+    {
+        serverEnable=true;
+        ConfigurationSerialization.registerClass(com.mm.siege.dungeon.Drop.class);
+        path = getDataFolder().getAbsolutePath();
+        format  = new SimpleDateFormat("yyyy.MM.dd HH:mm:ss");
+        getCommand("siege").setExecutor(new Commands(this));
+        getCommand("castle").setExecutor(new Commands(this));
+        instance = this;
+        EventListener evtList= new EventListener(this);
+        Bukkit.getPluginManager().registerEvents(evtList, this);
+        Residence res = (Residence) getServer().getPluginManager().getPlugin("Residence");
+        EconomyInterface econ = res.getEconomyManager();
+        resmgr = ResidenceApi.getResidenceManager();
+        sc = (SimpleClans) getServer().getPluginManager().getPlugin("SimpleClans");
+        ClanMgr= sc.getClanManager();
+        mvc = (Core) getServer().getPluginManager().getPlugin("Multiverse-Core");
+        config = new Configs(this);
+        Double money=99999999999999D;
+        //log.info("+++"+econ.economyOK());
+        //econ.
+        siegeTradeAmounts = econ.getBalance("SiegeTradeAmounts..");
+        econ.subtract("SiegeTradeAmounts..", siegeTradeAmounts);
+        for (SiegeTask task: config.tasks.values()){
+            if(econ.getBalance("SiegeCrops.."+task.name)<money){
+                money=econ.getBalance("SiegeCrops.."+task.name);
+            }
+            dungeonsStages.put(task.owner, 1);
+            
+            String path = this.getServer().getWorldContainer().getAbsolutePath().replace(".", "")+"Dungeon"+task.owner;
+            util.deleteDirectoryStream(path);
+        }
+        if (money>=1000){
+            for (SiegeTask task: config.tasks.values()){
+                econ.subtract("SiegeCrops.."+task.name, money-100);
+            }
+        }
+        checkTask();
+        dungeonCheckTask();
+        NewLanguageManager = new Language(this);
+    }
+
+    public static main getInstance() {        
+        return instance;
+    }
+    
+    public void msg(CommandSender sender, lm lm, Object... variables) {
+	if (sender == null)
+	    return;
+
+        Object msg = getLM().getMessage(lm, variables);
+        if (msg instanceof String)
+            sender.sendMessage((String) msg);
+        else 
+            sender.sendMessage((String[])((ArrayList) msg).toArray(new String[0]));
+    }
+        
+    public Language getLM() {
+	return NewLanguageManager;
+    }
+    
+    @Override
+    public void onDisable () {
+        serverEnable=false;
+        dungeons.forEach((siege, dungeon)->{
+            if (dungeon.getWorld().getPlayers().size()>0){
+                util.checkChunkLoad(config.tasks.get(siege).SpawnPoints.get("Owner").getBlock());
+                dungeon.getWorld().getPlayers().forEach((player)->{
+                    player.teleport(config.tasks.get(siege).SpawnPoints.get("Owner"));
+                });
+            }
+        });
+    }
+    public void checkTask()
+    {
+        Thread SiegeCheckThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                do {
+                    double seconds;
+                    long start = System.nanoTime();  
+                    //config.tasks.values().forEach((task)->{
+                    for (SiegeTask task : config.tasks.values() ) {   
+                        if(task.hasTime() && !task.siegeState) {
+                            Bukkit.getOnlinePlayers().forEach((player)-> {
+                                player.playSound(player.getLocation(), Sound.ENTITY_IRON_GOLEM_DEATH, 1.0f, 1.0f);
+                                player.sendTitle((String) getLM().getMessage(lm.Siege_beginTitle, task.name), "", 10, 50, 50);
+                            });
+                            task.start();
+                        }
+                        if(task.datediff < -task.duration ) {
+                            Bukkit.getOnlinePlayers().forEach((player)-> {
+                                player.playSound(player.getLocation(), Sound.ENTITY_ZOMBIE_INFECT, 1.0f, 1.0f);
+                                String subtitle = "";
+                                if (!task.owner.equalsIgnoreCase(""))
+                                    subtitle=(String) getLM().getMessage(lm.Siege_endSubtitle, task.owner);
+                                player.sendTitle((String) getLM().getMessage(lm.Siege_endTitle, task.name), subtitle, 10, 100, 100);
+
+                            });
+                            task.stop();
+                            start=start-100000;
+                            Bukkit.getServer().getScheduler().runTask(instance, () -> {  
+                                task.ResetScoreboard (true);
+                            });
+                            config.saveSiege (task.owner, format.format(task.date), task.name);
+                            reload=true;
+                            CurrentTask = task.name;
+                        }
+                        if (task.siegeState) {
+                            ClanMgr= sc.getClanManager();
+                            ArrayList <Player> players = resmgr.getByName(task.name).getPlayersInResidence();
+                            players.forEach((player) -> {
+                                final String PlayerClan;
+                                if (ClanMgr.getClanPlayer(player) instanceof ClanPlayer)
+                                    PlayerClan = ClanMgr.getClanPlayer(player).getClan().getName();
+                                else
+                                    PlayerClan = "";
+                                if (!PlayerClan.equalsIgnoreCase("")) {
+                                    Bukkit.getServer().getScheduler().runTask(instance, () -> {  
+                                        task.ResetScoreboard(false);
+                                        if (task.owner.equalsIgnoreCase(PlayerClan) && task.objective!=null){
+                                            task.objective.setDisplayName(ChatColor.GREEN + (String) getLM().getMessage(lm.Siege_siege) + " " + ChatColor.WHITE + task.name);
+                                        } else if (task.objective!=null){
+                                            task.objective.setDisplayName(ChatColor.RED + (String) getLM().getMessage(lm.Siege_siege) + " " + ChatColor.WHITE + task.name);
+                                        }
+                                        task.CapturedLocations.values().forEach((loc)->{
+                                            if (loc.CheckOnLoc(player) && !loc.PlayerName.equalsIgnoreCase(player.getName())){
+                                                loc.Time = config.TimeToCapture;
+                                                loc.PlayerName = player.getName();
+                                                task.CapturedLocations.replace(loc.Name, loc);
+                                            } else if (!loc.CheckOnLoc(player) && loc.PlayerName.equalsIgnoreCase(player.getName())) {
+                                                loc.Time = config.TimeToCapture;
+                                                //loc.PlayerName = task.owner;
+                                                task.CapturedLocations.replace(loc.Name, loc);
+                                            }
+
+                                            if(PlayerClan.equalsIgnoreCase(loc.Owner)&& task.objective!=null) {
+                                                task.score = task.objective.getScore(ChatColor.GREEN +loc.Name+":");
+                                                task.score.setScore((int)(100-(100/config.TimeToCapture*loc.Time)));
+                                            } else if (task.objective!=null){
+                                                task.score = task.objective.getScore(ChatColor.RED +loc.Name+":");
+                                                task.score.setScore((int)(100/config.TimeToCapture*loc.Time));
+                                            }
+
+                                        });
+                                        if (task.board!=null)
+                                            player.setScoreboard(task.board);
+                                    });
+                                }
+                            });
+
+                            List<String> Name = new ArrayList<>();
+                            task.CapturedLocations.values().forEach((loc)->{
+                                if (!loc.PlayerName.equalsIgnoreCase("")) {
+                                    Player p = Bukkit.getPlayer(loc.PlayerName);
+                                    if (p!=null) {
+                                        if (ClanMgr.getClanPlayer(p)!=null) {
+                                            if (task.siegeState
+                                                    && !ClanMgr.getClanPlayer(p).getClan().getName().equalsIgnoreCase(loc.Owner)) {
+                                                if (!loc.Loc.getWorld().getName().equals(Bukkit.getPlayer(loc.PlayerName).getWorld().getName())
+                                                        || loc.Loc.getX() != (int) p.getLocation().getX()
+                                                        || loc.Loc.getY() != (int) p.getLocation().getY()
+                                                        || loc.Loc.getZ() != (int) p.getLocation().getZ()) {
+                                                    loc.PlayerName="";
+                                                    loc.Time=config.TimeToCapture;
+                                                } else {
+                                                    loc.Time--;
+                                                    if (loc.Time == 0){
+                                                        loc.Owner = ClanMgr.getClanPlayer(p).getClan().getName();
+                                                        loc.PlayerName = "";
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                task.CapturedLocations.replace(loc.Name, loc);
+                                Name.add(loc.Owner);
+                            });
+
+                            if (task.CapturedLocations.size()>0) {
+                                if (ClanMgr!=null)
+                                if (Collections.frequency(Name, Name.get(0)) == task.CapturedLocations.size() && !Name.get(0).isEmpty()) {
+                                    Clan clan= util.getClanByName (ClanMgr, Name.get(0));
+                                    task.ClanPlayerList.clear();
+                                    if (clan!=null) {
+                                        task.owner = Name.get(0);
+                                        clan.getMembers().forEach((cplayer)->{
+                                            task.ClanPlayerList.add(cplayer.getName());
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    if (reload) {
+                        config.load(CurrentTask);
+                        reload = false;
+                    }
+                    seconds = (System.nanoTime() - start) / 1_000_000.0;
+                    try {
+                        if (seconds<1000)
+                            Thread.sleep((long)(1000-seconds));
+                    } catch (InterruptedException e) {}
+                    //seconds = (System.nanoTime() - start) / 1_000_000_000.0;
+                    //System.out.println("Cicle in: " + String.valueOf(seconds));
+                } while (serverEnable); 
+            }
+        });
+        SiegeCheckThread.start();
+    }
+    public void dungeonCheckTask() {
+        MVWorldManager mvwm = this.mvc.getMVWorldManager();
+        getServer().getScheduler().scheduleSyncRepeatingTask(this, () -> {
+            config.tasks.keySet().forEach((siege)-> {
+                Bukkit.getWorlds().forEach((world)->{
+                    if (world.getName().equalsIgnoreCase("Dungeon"+siege) && world.getPlayers().isEmpty()){
+                        if (this.dungeons.containsKey(siege)) {
+                            this.dungeons.get(siege).getBossBar().removeAll();
+                            this.dungeons.get(siege).disable();
+                            this.dungeons.remove(siege);
+                        } else {
+                            //String worldPath = world.getWorldFolder().getAbsolutePath();
+                            //mvwm.removeWorldFromConfig(world.getName());
+                            //mvwm.removePlayersFromWorld(world.getName());
+                            mvwm.deleteWorld(world.getName(), true, true);
+                            //util.deleteDirectoryStream(world.getWorldFolder());
+                        }
+                    }
+                });
+                if (!this.dungeons.containsKey(siege)) {
+                    mvwm.getUnloadedWorlds().forEach((world)->{
+                        if (world.equalsIgnoreCase("Dungeon"+siege)) {
+                            //mvwm.deleteWorld("Dungeon"+siege, true, true);
+                            mvwm.removeWorldFromConfig("Dungeon"+siege);
+                            String path = this.getServer().getWorldContainer().getAbsolutePath().replace(".", "")+"Dungeon"+siege;
+                            util.deleteDirectoryStream(path);
+                        }
+                    });
+                    //String path = this.getServer().getWorldContainer().getAbsolutePath().replace(".", "")+"Dungeon"+siege;
+                    //log.info(path);
+                    //util.deleteDirectoryStream(path);
+                }
+            });
+        },0L,120L);
+    }
+}
